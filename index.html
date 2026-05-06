@@ -2276,7 +2276,29 @@
       } catch(e) {}
     }
 
+    // ── Galerie dynamique depuis l'API ───────────────────────────────────────
+    async function loadGalleryFromAPI() {
+      try {
+        const items = await fetch('/api/gallery').then(r => r.json());
+        const grid  = document.querySelector('.gallery-grid');
+        if (!grid || !items.length) return;
+
+        grid.innerHTML = items.map((g, i) => {
+          const label = currentLang === 'fr' ? (g.label_fr || '') : (g.label_en || '');
+          // Le premier item conserve le style grand portrait (nth-child(1) CSS)
+          return `
+            <div class="gallery-item" data-aos="zoom-in" data-aos-delay="${(i % 3) * 80}">
+              <img src="${g.filename}" alt="${label}" loading="lazy" />
+              <div class="gallery-overlay"><span>${label}</span></div>
+            </div>`;
+        }).join('');
+
+        AOS.refresh();
+      } catch(e) { /* garde le HTML statique si API non dispo */ }
+    }
+
     loadServicesFromAPI();
+    loadGalleryFromAPI();
     loadReviewsFromAPI();
 
     // ── Formulaire d'avis client ────────────────────────────────────────────

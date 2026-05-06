@@ -1,57 +1,114 @@
-const express = require('express');
-const multer  = require('multer');
-const path    = require('path');
-const fs      = require('fs');
-const crypto  = require('crypto');
+const express  = require('express');
+const multer   = require('multer');
+const path     = require('path');
+const crypto   = require('crypto');
+const { Pool } = require('pg');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'benekeup2026';
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(__dirname));
 
-// Routes HTML explicites
+// ── Routes HTML ───────────────────────────────────────────────────────────────
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.get('/',      (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
-// ── Dossiers ────────────────────────────────────────────────────────────────
-const DATA_DIR    = path.join(__dirname, 'data');
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
-[DATA_DIR, UPLOADS_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
-
-const FILES = {
-  services : path.join(DATA_DIR, 'services.json'),
-  gallery  : path.join(DATA_DIR, 'gallery.json'),
-  reviews  : path.join(DATA_DIR, 'reviews.json'),
-  tokens   : path.join(DATA_DIR, 'tokens.json'),
-};
-
-function read(file, def = []) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return def; }
-}
-function write(file, data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 2));
-}
-
-// Initialise les fichiers JSON s'ils n'existent pas
-if (!fs.existsSync(FILES.services)) write(FILES.services, require('./data/services-default.json'));
-if (!fs.existsSync(FILES.gallery))  write(FILES.gallery,  require('./data/gallery-default.json'));
-if (!fs.existsSync(FILES.reviews))  write(FILES.reviews,  require('./data/reviews-default.json'));
-
-// ── Upload Multer ─────────────────────────────────────────────────────────
-const storage = multer.diskStorage({
-  destination: UPLOADS_DIR,
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `${Date.now()}${ext}`);
-  }
+// ── PostgreSQL ────────────────────────────────────────────────────────────────
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
-const upload = multer({ storage, limits: { fileSize: 15 * 1024 * 1024 } });
 
-// ── Auth ─────────────────────────────────────────────────────────────────
-const activeTokens = new Set(read(FILES.tokens, []));
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS services (
+      id TEXT PRIMARY KEY,
+      icon TEXT DEFAULT 'fas fa-star',
+      title_fr TEXT NOT NULL DEFAULT '',
+      title_en TEXT NOT NULL DEFAULT '',
+      desc_fr TEXT DEFAULT '',
+      desc_en TEXT DEFAULT '',
+      price TEXT DEFAULT '',
+      tag_fr TEXT DEFAULT '',
+      tag_en TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS gallery (
+      id TEXT PRIMARY KEY,
+      filename TEXT DEFAULT '',
+      image_data TEXT DEFAULT NULL,
+      label_fr TEXT DEFAULT '',
+      label_en TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS reviews (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT '',
+      location TEXT DEFAULT '',
+      text TEXT NOT NULL DEFAULT '',
+      rating INTEGER DEFAULT 5,
+      approved BOOLEAN DEFAULT FALSE,
+      date TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS tokens (
+      token TEXT PRIMARY KEY,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
 
+  // Seed services si vide
+  const { rowCount: sc } = await pool.query('SELECT 1 FROM services LIMIT 1');
+  if (!sc) {
+    for (const s of require('./data/services-default.json')) {
+      await pool.query(
+        'INSERT INTO services(id,icon,title_fr,title_en,desc_fr,desc_en,price,tag_fr,tag_en) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING',
+        [s.id, s.icon, s.title_fr, s.title_en, s.desc_fr, s.desc_en, s.price, s.tag_fr, s.tag_en]
+      );
+    }
+  }
+
+  // Seed gallery si vide
+  const { rowCount: gc } = await pool.query('SELECT 1 FROM gallery LIMIT 1');
+  if (!gc) {
+    for (const g of require('./data/gallery-default.json')) {
+      await pool.query(
+        'INSERT INTO gallery(id,filename,label_fr,label_en) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',
+        [g.id, g.filename, g.label_fr, g.label_en]
+      );
+    }
+  }
+
+  // Seed reviews si vide
+  const { rowCount: rc } = await pool.query('SELECT 1 FROM reviews LIMIT 1');
+  if (!rc) {
+    for (const r of require('./data/reviews-default.json')) {
+      await pool.query(
+        'INSERT INTO reviews(id,name,location,text,rating,approved,date) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING',
+        [r.id, r.name, r.location, r.text, r.rating, r.approved, r.date]
+      );
+    }
+  }
+
+  console.log('✅ Base de données initialisée');
+}
+
+// Charge les tokens actifs en mémoire
+const activeTokens = new Set();
+async function loadTokens() {
+  const res = await pool.query("SELECT token FROM tokens WHERE created_at > NOW() - INTERVAL '7 days'");
+  res.rows.forEach(r => activeTokens.add(r.token));
+}
+
+// ── Upload (mémoire → base64 en DB) ──────────────────────────────────────────
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+});
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
 function auth(req, res, next) {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
   if (!activeTokens.has(token)) return res.status(401).json({ error: 'Non autorisé' });
@@ -63,104 +120,131 @@ app.post('/api/auth/login', (req, res) => {
     return res.status(401).json({ error: 'Mot de passe incorrect' });
   const token = crypto.randomBytes(32).toString('hex');
   activeTokens.add(token);
-  write(FILES.tokens, [...activeTokens]);
+  pool.query('INSERT INTO tokens(token) VALUES($1) ON CONFLICT DO NOTHING', [token]);
   res.json({ token });
 });
 
 app.post('/api/auth/logout', auth, (req, res) => {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
   activeTokens.delete(token);
-  write(FILES.tokens, [...activeTokens]);
+  pool.query('DELETE FROM tokens WHERE token=$1', [token]);
   res.json({ ok: true });
 });
 
-// ── Services ──────────────────────────────────────────────────────────────
-app.get('/api/services', (_, res) => res.json(read(FILES.services)));
-
-app.post('/api/services', auth, (req, res) => {
-  const list = read(FILES.services);
-  const item = { id: Date.now().toString(), ...req.body };
-  list.push(item);
-  write(FILES.services, list);
-  res.json(item);
+// ── Services ──────────────────────────────────────────────────────────────────
+app.get('/api/services', async (req, res) => {
+  const r = await pool.query('SELECT * FROM services ORDER BY created_at');
+  res.json(r.rows);
 });
 
-app.put('/api/services/:id', auth, (req, res) => {
-  const list = read(FILES.services);
-  const i = list.findIndex(s => s.id === req.params.id);
-  if (i < 0) return res.status(404).json({ error: 'Introuvable' });
-  list[i] = { ...list[i], ...req.body };
-  write(FILES.services, list);
-  res.json(list[i]);
+app.post('/api/services', auth, async (req, res) => {
+  const { icon, title_fr, title_en, desc_fr, desc_en, price, tag_fr, tag_en } = req.body;
+  const id = Date.now().toString();
+  await pool.query(
+    'INSERT INTO services(id,icon,title_fr,title_en,desc_fr,desc_en,price,tag_fr,tag_en) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+    [id, icon, title_fr, title_en, desc_fr, desc_en, price, tag_fr, tag_en]
+  );
+  res.json({ id, ...req.body });
 });
 
-app.delete('/api/services/:id', auth, (req, res) => {
-  write(FILES.services, read(FILES.services).filter(s => s.id !== req.params.id));
+app.put('/api/services/:id', auth, async (req, res) => {
+  const { icon, title_fr, title_en, desc_fr, desc_en, price, tag_fr, tag_en } = req.body;
+  await pool.query(
+    'UPDATE services SET icon=$1,title_fr=$2,title_en=$3,desc_fr=$4,desc_en=$5,price=$6,tag_fr=$7,tag_en=$8 WHERE id=$9',
+    [icon, title_fr, title_en, desc_fr, desc_en, price, tag_fr, tag_en, req.params.id]
+  );
+  res.json({ id: req.params.id, ...req.body });
+});
+
+app.delete('/api/services/:id', auth, async (req, res) => {
+  await pool.query('DELETE FROM services WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
 });
 
-// ── Galerie ───────────────────────────────────────────────────────────────
-app.get('/api/gallery', (_, res) => res.json(read(FILES.gallery)));
-
-app.post('/api/gallery', auth, upload.single('image'), (req, res) => {
-  const list = read(FILES.gallery);
-  const item = {
-    id: Date.now().toString(),
-    filename: req.file ? `/uploads/${req.file.filename}` : (req.body.filename || ''),
-    label_fr: req.body.label_fr || '',
-    label_en: req.body.label_en || '',
-  };
-  list.push(item);
-  write(FILES.gallery, list);
-  res.json(item);
+// ── Galerie ───────────────────────────────────────────────────────────────────
+app.get('/api/gallery', async (req, res) => {
+  const r = await pool.query('SELECT id,filename,label_fr,label_en FROM gallery ORDER BY created_at');
+  res.json(r.rows);
 });
 
-app.delete('/api/gallery/:id', auth, (req, res) => {
-  const list  = read(FILES.gallery);
-  const item  = list.find(g => g.id === req.params.id);
-  if (item?.filename?.startsWith('/uploads/')) {
-    try { fs.unlinkSync(path.join(__dirname, item.filename)); } catch {}
+// Sert les images uploadées depuis la DB
+app.get('/api/gallery/:id/image', async (req, res) => {
+  try {
+    const r = await pool.query('SELECT image_data FROM gallery WHERE id=$1', [req.params.id]);
+    if (!r.rows.length || !r.rows[0].image_data) return res.status(404).end();
+    const buf = Buffer.from(r.rows[0].image_data, 'base64');
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(buf);
+  } catch { res.status(500).end(); }
+});
+
+app.post('/api/gallery', auth, upload.single('image'), async (req, res) => {
+  const id = Date.now().toString();
+  let filename = req.body.filename || '';
+  let imageData = null;
+
+  if (req.file) {
+    imageData = req.file.buffer.toString('base64');
+    filename  = `/api/gallery/${id}/image`;
   }
-  write(FILES.gallery, list.filter(g => g.id !== req.params.id));
+
+  await pool.query(
+    'INSERT INTO gallery(id,filename,image_data,label_fr,label_en) VALUES($1,$2,$3,$4,$5)',
+    [id, filename, imageData, req.body.label_fr || '', req.body.label_en || '']
+  );
+  res.json({ id, filename, label_fr: req.body.label_fr || '', label_en: req.body.label_en || '' });
+});
+
+app.delete('/api/gallery/:id', auth, async (req, res) => {
+  await pool.query('DELETE FROM gallery WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
 });
 
-// ── Avis ─────────────────────────────────────────────────────────────────
-app.get('/api/reviews', (_, res) =>
-  res.json(read(FILES.reviews).filter(r => r.approved)));
+// ── Avis ──────────────────────────────────────────────────────────────────────
+app.get('/api/reviews', async (req, res) => {
+  const r = await pool.query('SELECT * FROM reviews WHERE approved=true ORDER BY created_at');
+  res.json(r.rows);
+});
 
-app.post('/api/reviews', (req, res) => {
-  const list = read(FILES.reviews);
-  const item = {
-    id:       Date.now().toString(),
-    name:     (req.body.name     || '').slice(0, 60),
-    location: (req.body.location || '').slice(0, 80),
-    text:     (req.body.text     || '').slice(0, 500),
-    rating:   Math.min(5, Math.max(1, parseInt(req.body.rating) || 5)),
-    approved: false,
-    date:     new Date().toISOString().split('T')[0],
-  };
-  list.push(item);
-  write(FILES.reviews, list);
+app.post('/api/reviews', async (req, res) => {
+  const id = Date.now().toString();
+  await pool.query(
+    'INSERT INTO reviews(id,name,location,text,rating,approved,date) VALUES($1,$2,$3,$4,$5,false,$6)',
+    [id,
+     (req.body.name     || '').slice(0, 60),
+     (req.body.location || '').slice(0, 80),
+     (req.body.text     || '').slice(0, 500),
+     Math.min(5, Math.max(1, parseInt(req.body.rating) || 5)),
+     new Date().toISOString().split('T')[0]]
+  );
   res.json({ ok: true });
 });
 
-app.get('/api/admin/reviews', auth, (_, res) => res.json(read(FILES.reviews)));
-
-app.put('/api/reviews/:id/approve', auth, (req, res) => {
-  const list = read(FILES.reviews);
-  const i    = list.findIndex(r => r.id === req.params.id);
-  if (i < 0) return res.status(404).json({ error: 'Introuvable' });
-  list[i].approved = !list[i].approved;
-  write(FILES.reviews, list);
-  res.json(list[i]);
+app.get('/api/admin/reviews', auth, async (req, res) => {
+  const r = await pool.query('SELECT * FROM reviews ORDER BY created_at DESC');
+  res.json(r.rows);
 });
 
-app.delete('/api/reviews/:id', auth, (req, res) => {
-  write(FILES.reviews, read(FILES.reviews).filter(r => r.id !== req.params.id));
+app.put('/api/reviews/:id/approve', auth, async (req, res) => {
+  const r = await pool.query('UPDATE reviews SET approved = NOT approved WHERE id=$1 RETURNING *', [req.params.id]);
+  res.json(r.rows[0]);
+});
+
+app.delete('/api/reviews/:id', auth, async (req, res) => {
+  await pool.query('DELETE FROM reviews WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
 });
 
-app.use('/uploads', express.static(UPLOADS_DIR));
-
-app.listen(PORT, () => console.log(`Benekeup running on :${PORT}`));
+// ── Démarrage ─────────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    await initDB();
+    await loadTokens();
+    app.listen(PORT, () => console.log(`🚀 Benekeup Beauty sur le port ${PORT}`));
+  } catch (err) {
+    console.error('❌ Erreur DB:', err.message);
+    // Démarrer quand même sans DB (mode dégradé)
+    app.listen(PORT, () => console.log(`⚠️  Démarré sans DB sur le port ${PORT}`));
+  }
+})();
