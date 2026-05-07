@@ -392,6 +392,49 @@ tr:hover td{background:#fafafa}
   </div>
 </div>
 
+<!-- Modal Edit Photo -->
+<div class="modal-backdrop" id="editPhotoModal">
+  <div class="modal" style="max-width:640px">
+    <div class="modal-header">
+      <h3><i class="fas fa-crop-alt"></i> Rogner la photo</h3>
+      <button class="modal-close" onclick="closeEditModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="crop-toolbar">
+        <span class="lbl">Format :</span>
+        <button class="aspect-btn edit-asp active" onclick="setEditAspect(NaN,this)">Libre</button>
+        <button class="aspect-btn edit-asp" onclick="setEditAspect(1,this)">1:1</button>
+        <button class="aspect-btn edit-asp" onclick="setEditAspect(4/3,this)">4:3</button>
+        <button class="aspect-btn edit-asp" onclick="setEditAspect(3/4,this)">3:4</button>
+        <button class="aspect-btn edit-asp" onclick="setEditAspect(16/9,this)">16:9</button>
+      </div>
+      <div class="crop-container" id="editCropContainer" style="min-height:200px;align-items:center;justify-content:center">
+        <div id="editCropLoader" style="color:#fff;font-size:.88rem"><i class="fas fa-spinner fa-spin"></i> Chargement...</div>
+        <img id="editCropperImage" alt="Photo à rogner" style="display:none;max-width:100%"/>
+      </div>
+      <p style="font-size:.75rem;color:var(--gris);margin-top:.5rem;text-align:center">
+        <i class="fas fa-info-circle"></i> Faites glisser pour ajuster — la zone sélectionnée sera sauvegardée
+      </p>
+      <div class="form-row" style="margin-top:1.2rem">
+        <div class="form-group">
+          <label>Étiquette (FR)</label>
+          <input type="text" id="editLabelFr" placeholder="Look soirée"/>
+        </div>
+        <div class="form-group">
+          <label>Étiquette (EN)</label>
+          <input type="text" id="editLabelEn" placeholder="Evening look"/>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeEditModal()">Annuler</button>
+      <button class="btn btn-primary" id="saveEditBtn" onclick="saveEditPhoto(this)">
+        <i class="fas fa-save"></i> Enregistrer
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
@@ -561,6 +604,10 @@ async function loadGallery() {
       <img src="${g.filename}" alt="${g.label_fr}" loading="lazy"/>
       <div class="label">${g.label_fr}</div>
       <div class="overlay">
+        <button class="btn btn-warn btn-sm"
+          onclick="openEditPhotoModal('${g.id}','${g.filename}',${JSON.stringify(g.label_fr)},${JSON.stringify(g.label_en)})">
+          <i class="fas fa-crop-alt"></i> Rogner
+        </button>
         <button class="btn btn-danger btn-sm" onclick="deletePhoto('${g.id}')">
           <i class="fas fa-trash"></i> Supprimer
         </button>
@@ -696,6 +743,86 @@ async function deleteReview(id) {
   const r = await fetch(`${API}/api/reviews/${id}`, { method:'DELETE', headers: authHeaders() });
   if (r.ok) { toast('Avis supprimé.'); loadReviews(); loadDashboard(); }
   else toast('Erreur.','error');
+}
+
+// ── Édition photo existante ────────────────────────────────────────────────────
+let editCropperInstance = null;
+let editingPhotoId      = null;
+
+async function openEditPhotoModal(id, filename, labelFr, labelEn) {
+  editingPhotoId = id;
+  document.getElementById('editLabelFr').value = labelFr || '';
+  document.getElementById('editLabelEn').value = labelEn || '';
+  document.querySelectorAll('.edit-asp').forEach((b,i) => b.classList.toggle('active', i===0));
+
+  const img    = document.getElementById('editCropperImage');
+  const loader = document.getElementById('editCropLoader');
+
+  // Réinitialise
+  if (editCropperInstance) { editCropperInstance.destroy(); editCropperInstance = null; }
+  img.style.display = 'none';
+  loader.style.display = 'block';
+  document.getElementById('editPhotoModal').classList.add('open');
+
+  try {
+    // Charge l'image via fetch pour éviter les problèmes de canvas taint
+    const resp  = await fetch(filename + (filename.includes('?') ? '&' : '?') + '_t=' + Date.now());
+    const blob  = await resp.blob();
+    const objUrl = URL.createObjectURL(blob);
+
+    img.onload = () => {
+      loader.style.display = 'none';
+      img.style.display    = 'block';
+      if (editCropperInstance) editCropperInstance.destroy();
+      editCropperInstance = new Cropper(img, {
+        viewMode:     1,
+        aspectRatio:  NaN,
+        autoCropArea: 1,
+        responsive:   true,
+        restore:      false,
+      });
+      // Libère l'URL objet après init du cropper
+      setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+    };
+    img.src = objUrl;
+  } catch(e) {
+    loader.innerHTML = '<span style="color:#ef4444"><i class="fas fa-exclamation-triangle"></i> Impossible de charger l\'image.</span>';
+  }
+}
+
+function setEditAspect(ratio, btn) {
+  if (editCropperInstance) editCropperInstance.setAspectRatio(isNaN(ratio) ? NaN : ratio);
+  document.querySelectorAll('.edit-asp').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function closeEditModal() {
+  if (editCropperInstance) { editCropperInstance.destroy(); editCropperInstance = null; }
+  document.getElementById('editPhotoModal').classList.remove('open');
+}
+
+async function saveEditPhoto(btn) {
+  if (!editCropperInstance) return;
+  btn.disabled    = true;
+  btn.innerHTML   = '<i class="fas fa-spinner fa-spin"></i> Enregistrement...';
+
+  try {
+    const canvas = editCropperInstance.getCroppedCanvas({ maxWidth: 1400, maxHeight: 1400, imageSmoothingQuality: 'high' });
+    const blob   = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.88));
+
+    const fd = new FormData();
+    fd.append('image',    blob, 'photo.jpg');
+    fd.append('label_fr', document.getElementById('editLabelFr').value);
+    fd.append('label_en', document.getElementById('editLabelEn').value);
+
+    const r = await fetch(`${API}/api/gallery/${editingPhotoId}`, {
+      method: 'PUT', headers: { Authorization: `Bearer ${token}` }, body: fd
+    });
+
+    if (r.ok) { toast('Photo mise à jour !'); closeEditModal(); loadGallery(); loadDashboard(); }
+    else toast('Erreur lors de la mise à jour.', 'error');
+  } catch(e) { toast('Erreur inattendue.', 'error'); }
+  finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Enregistrer'; }
 }
 
 // ── Modal helpers ─────────────────────────────────────────────────────────────

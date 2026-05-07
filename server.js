@@ -196,6 +196,24 @@ app.post('/api/gallery', auth, upload.single('image'), async (req, res) => {
   res.json({ id, filename, label_fr: req.body.label_fr || '', label_en: req.body.label_en || '' });
 });
 
+app.put('/api/gallery/:id', auth, upload.single('image'), async (req, res) => {
+  const id = req.params.id;
+  if (req.file) {
+    const imageData = req.file.buffer.toString('base64');
+    const filename  = `/api/gallery/${id}/image`;
+    await pool.query(
+      'UPDATE gallery SET filename=$1,image_data=$2,label_fr=$3,label_en=$4 WHERE id=$5',
+      [filename, imageData, req.body.label_fr || '', req.body.label_en || '', id]
+    );
+  } else {
+    await pool.query(
+      'UPDATE gallery SET label_fr=$1,label_en=$2 WHERE id=$3',
+      [req.body.label_fr || '', req.body.label_en || '', id]
+    );
+  }
+  res.json({ ok: true });
+});
+
 app.delete('/api/gallery/:id', auth, async (req, res) => {
   await pool.query('DELETE FROM gallery WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
