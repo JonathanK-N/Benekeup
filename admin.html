@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Admin — Benekeup Beauty's</title>
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet"/>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css" rel="stylesheet"/>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -116,7 +117,14 @@ tr:hover td{background:#fafafa}
 .upload-zone i{font-size:2rem;color:var(--rose);margin-bottom:.5rem}
 .upload-zone p{font-size:.85rem;color:var(--gris)}
 #fileInput{display:none}
-.preview-img{width:100%;max-height:200px;object-fit:cover;border-radius:8px;margin-top:.8rem}
+
+/* CROPPER */
+.crop-container{background:#111;border-radius:10px;overflow:hidden;max-height:340px;display:flex;align-items:center;justify-content:center}
+.crop-container img{max-width:100%;display:block}
+.crop-toolbar{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem}
+.crop-toolbar .lbl{font-size:.72rem;font-weight:700;color:var(--gris);text-transform:uppercase;letter-spacing:.06em;margin-right:.3rem}
+.aspect-btn{padding:.3rem .75rem;border:1.5px solid var(--border);border-radius:6px;font-size:.78rem;font-weight:700;cursor:pointer;background:#fff;transition:.2s;color:var(--noir)}
+.aspect-btn:hover,.aspect-btn.active{border-color:var(--rose);background:#fff5f4;color:var(--rose)}
 
 /* ICON PICKER */
 .icon-options{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.5rem}
@@ -325,22 +333,48 @@ tr:hover td{background:#fafafa}
 
 <!-- Modal Gallery -->
 <div class="modal-backdrop" id="galleryModal">
-  <div class="modal">
+  <div class="modal" style="max-width:640px">
     <div class="modal-header">
       <h3>Ajouter une photo</h3>
       <button class="modal-close" onclick="closeModal('galleryModal')">✕</button>
     </div>
     <div class="modal-body">
-      <div class="form-group">
-        <label>Photo</label>
-        <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
-          <i class="fas fa-cloud-upload-alt"></i>
-          <p>Cliquez pour choisir une image (JPG, PNG — max 15 Mo)</p>
+
+      <!-- Étape 1 : choisir le fichier -->
+      <div id="uploadStep1">
+        <div class="form-group">
+          <label>Photo</label>
+          <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
+            <i class="fas fa-cloud-upload-alt"></i>
+            <p>Cliquez pour choisir une image (JPG, PNG — max 15 Mo)</p>
+          </div>
+          <input type="file" id="fileInput" accept="image/*" onchange="initCropper(this)"/>
         </div>
-        <input type="file" id="fileInput" accept="image/*" onchange="previewFile(this)"/>
-        <img id="uploadPreview" class="preview-img" style="display:none"/>
       </div>
-      <div class="form-row">
+
+      <!-- Étape 2 : rogner -->
+      <div id="uploadStep2" style="display:none">
+        <div class="crop-toolbar">
+          <span class="lbl">Format :</span>
+          <button class="aspect-btn active" onclick="setAspect(NaN,this)">Libre</button>
+          <button class="aspect-btn" onclick="setAspect(1/1,this)">1:1</button>
+          <button class="aspect-btn" onclick="setAspect(4/3,this)">4:3</button>
+          <button class="aspect-btn" onclick="setAspect(3/4,this)">3:4</button>
+          <button class="aspect-btn" onclick="setAspect(16/9,this)">16:9</button>
+          <button class="btn btn-ghost btn-sm" onclick="resetUpload()" style="margin-left:auto">
+            <i class="fas fa-redo"></i> Changer
+          </button>
+        </div>
+        <div class="crop-container">
+          <img id="cropperImage" alt="Aperçu"/>
+        </div>
+        <p style="font-size:.75rem;color:var(--gris);margin-top:.5rem;text-align:center">
+          <i class="fas fa-info-circle"></i> Faites glisser pour sélectionner la zone à garder
+        </p>
+      </div>
+
+      <!-- Étiquettes toujours visibles -->
+      <div class="form-row" style="margin-top:1.2rem">
         <div class="form-group">
           <label>Étiquette (FR)</label>
           <input type="text" id="galLabelFr" placeholder="Look soirée"/>
@@ -533,31 +567,79 @@ async function loadGallery() {
       </div>
     </div>`).join('') || '<p style="color:var(--gris)">Aucune photo.</p>';
 }
+// ── Cropper ────────────────────────────────────────────────────────────────────
+let cropperInstance = null;
+
 function openGalleryModal() {
   document.getElementById('galLabelFr').value = '';
   document.getElementById('galLabelEn').value = '';
-  document.getElementById('fileInput').value = '';
-  document.getElementById('uploadPreview').style.display = 'none';
+  document.getElementById('fileInput').value  = '';
+  if (cropperInstance) { cropperInstance.destroy(); cropperInstance = null; }
+  document.getElementById('uploadStep1').style.display = 'block';
+  document.getElementById('uploadStep2').style.display = 'none';
   document.getElementById('galleryModal').classList.add('open');
 }
-function previewFile(input) {
+
+function initCropper(input) {
   if (!input.files[0]) return;
-  const prev = document.getElementById('uploadPreview');
-  prev.src = URL.createObjectURL(input.files[0]);
-  prev.style.display = 'block';
+  const reader = new FileReader();
+  reader.onload = e => {
+    document.getElementById('uploadStep1').style.display = 'none';
+    document.getElementById('uploadStep2').style.display = 'block';
+    const img = document.getElementById('cropperImage');
+    if (cropperInstance) { cropperInstance.destroy(); cropperInstance = null; }
+    img.src = e.target.result;
+    cropperInstance = new Cropper(img, {
+      viewMode: 1,
+      aspectRatio: NaN,
+      autoCropArea: 0.95,
+      responsive: true,
+      restore: false,
+      checkOrientation: true,
+    });
+  };
+  reader.readAsDataURL(input.files[0]);
 }
+
+function setAspect(ratio, btn) {
+  if (cropperInstance) cropperInstance.setAspectRatio(ratio);
+  document.querySelectorAll('.aspect-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function resetUpload() {
+  if (cropperInstance) { cropperInstance.destroy(); cropperInstance = null; }
+  document.getElementById('fileInput').value  = '';
+  document.getElementById('cropperImage').src = '';
+  document.getElementById('uploadStep1').style.display = 'block';
+  document.getElementById('uploadStep2').style.display = 'none';
+  document.querySelectorAll('.aspect-btn').forEach((b,i) => b.classList.toggle('active', i === 0));
+}
+
 async function uploadPhoto() {
-  const file = document.getElementById('fileInput').files[0];
-  if (!file) { toast('Veuillez choisir une photo.','error'); return; }
-  const fd = new FormData();
-  fd.append('image', file);
-  fd.append('label_fr', document.getElementById('galLabelFr').value);
-  fd.append('label_en', document.getElementById('galLabelEn').value);
-  const r = await fetch(`${API}/api/gallery`, {
-    method:'POST', headers:{ Authorization:`Bearer ${token}` }, body: fd
-  });
-  if (r.ok) { toast('Photo ajoutée !'); closeModal('galleryModal'); loadGallery(); loadDashboard(); }
-  else toast('Erreur upload.','error');
+  if (!cropperInstance) { toast('Veuillez choisir une photo.', 'error'); return; }
+
+  const btn = event.currentTarget;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Publication...';
+
+  try {
+    const canvas = cropperInstance.getCroppedCanvas({ maxWidth: 1400, maxHeight: 1400, imageSmoothingQuality: 'high' });
+    const blob   = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.88));
+
+    const fd = new FormData();
+    fd.append('image',    blob, 'photo.jpg');
+    fd.append('label_fr', document.getElementById('galLabelFr').value);
+    fd.append('label_en', document.getElementById('galLabelEn').value);
+
+    const r = await fetch(`${API}/api/gallery`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd
+    });
+
+    if (r.ok) { toast('Photo publiée !'); closeModal('galleryModal'); loadGallery(); loadDashboard(); }
+    else toast('Erreur lors de la publication.', 'error');
+  } catch(e) { toast('Erreur inattendue.', 'error'); }
+  finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-upload"></i> Publier'; }
 }
 async function deletePhoto(id) {
   if (!confirm('Supprimer cette photo ?')) return;
@@ -622,5 +704,6 @@ document.querySelectorAll('.modal-backdrop').forEach(m => {
   m.addEventListener('click', e => { if (e.target === m) m.classList.remove('open'); });
 });
 </script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 </body>
 </html>
